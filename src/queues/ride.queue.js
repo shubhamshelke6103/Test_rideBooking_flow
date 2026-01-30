@@ -1,10 +1,10 @@
 const { Queue } = require('bullmq')
-const redis = require('../config/redis')
+const { bullRedis } = require('../config/redis')
 
 console.log("🚕 Initializing Ride Queue")
 
 const rideQueue = new Queue('ride-booking', {
-  connection: redis,
+  connection: bullRedis,
   prefix: '{ride-booking}' // REQUIRED for Redis Cluster
 })
 

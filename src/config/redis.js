@@ -1,47 +1,41 @@
 const IORedis = require('ioredis')
 
-const redis = new IORedis({
+const baseConfig = {
   host: process.env.REDIS_HOST,
   port: Number(process.env.REDIS_PORT) || 6379,
   password: process.env.REDIS_PASSWORD || undefined,
-
-  // AWS Redis requires TLS
   tls: {},
-
-  // BullMQ safe config
   maxRetriesPerRequest: null,
-  enableReadyCheck: false,
-
+  enableReadyCheck: true,
   connectTimeout: 10000,
   keepAlive: 10000,
 
   retryStrategy(times) {
-    const delay = Math.min(times * 200, 3000)
-    console.warn(`🔄 Redis retry #${times}, delay ${delay}ms`)
+    const delay = Math.min(times * 100, 3000)
+    console.warn(`🔄 Redis retry #${times} (${delay}ms)`)
     return delay
-  },
-
-  reconnectOnError(err) {
-    console.error('❌ Redis reconnect due to error:', err.message)
-    return true
   }
-})
+}
 
-// Logs
-redis.on('connect', () => {
-  console.log('✅ Redis Connected')
-})
+// Normal Redis commands
+const redis = new IORedis(baseConfig)
 
-redis.on('ready', () => {
-  console.log('⚡ Redis Ready')
-})
+// Publisher (Socket Events / BullMQ Pub)
+const redisPub = new IORedis(baseConfig)
 
-redis.on('error', (err) => {
-  console.error('❌ Redis Error:', err.message)
-})
+// Subscriber (Socket Events)
+const redisSub = new IORedis(baseConfig)
 
-redis.on('close', () => {
-  console.warn('🔌 Redis Connection Closed')
-})
+// BullMQ dedicated connection
+const bullRedis = new IORedis(baseConfig)
 
+redis.on('ready', () => console.log('✅ Redis Ready (Main)'))
+redisPub.on('ready', () => console.log('📡 Redis Publisher Ready'))
+redisSub.on('ready', () => console.log('📥 Redis Subscriber Ready'))
+bullRedis.on('ready', () => console.log('🐂 BullMQ Redis Ready'))
+
+// Export default client (main) and attach helper clients as properties
 module.exports = redis
+module.exports.redisPub = redisPub
+module.exports.redisSub = redisSub
+module.exports.bullRedis = bullRedis
