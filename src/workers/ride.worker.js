@@ -21,6 +21,7 @@ const worker = new Worker(
 
     for (let radius of SEARCH_RADII) {
       ride = await Ride.findById(rideId)
+
       if (!ride || ride.status === 'accepted') {
         console.log(`🏁 Ride already accepted — STOP worker`)
         return
@@ -49,17 +50,29 @@ const worker = new Worker(
       for (let driver of drivers) {
         if (ride.rejectedDrivers.includes(driver._id)) continue
 
+        // Lock driver for this ride
         await redis.set(`lock:driver:${driver._id}`, rideId, 'EX', ACCEPT_TIMEOUT)
 
         await Ride.findByIdAndUpdate(rideId, {
           $addToSet: { notifiedDrivers: driver._id }
         })
 
-        global.io.to(driver.socketId).emit('ride_request', {
+        // ✅ Get socket from Redis (MULTI-SERVER SAFE)
+        const socketId = await redis.get(`driver_socket:${driver._id}`)
+
+        if (!socketId) {
+          console.log(`⚠️ Driver ${driver._id} socket not found in Redis`)
+          continue
+        }
+
+        // ✅ Emit ride request safely
+        global.io.to(socketId).emit('ride_request', {
           rideId,
           pickupLocation: ride.pickupLocation,
           dropoffLocation: ride.dropoffLocation
         })
+
+        console.log(`📤 Ride sent to Driver ${driver._id}`)
       }
 
       console.log(`⏳ Waiting ${ACCEPT_TIMEOUT}s for accept...`)
@@ -69,7 +82,7 @@ const worker = new Worker(
         ride = await Ride.findById(rideId)
 
         if (ride?.status === 'accepted') {
-          console.log(`🏆 Ride accepted — STOP`)
+          console.log(`🏆 Ride accepted — STOP worker`)
           return
         }
 
@@ -79,6 +92,7 @@ const worker = new Worker(
       console.log(`🔁 Expanding search radius...`)
     }
 
+    // ❌ Cancel ride if still not accepted
     ride = await Ride.findById(rideId)
 
     if (ride?.status === 'requested') {
@@ -94,7 +108,7 @@ const worker = new Worker(
   {
     connection: redis,
     concurrency: 5,
-    prefix: '{ride-booking}' // REQUIRED
+    prefix: '{ride-booking}' // REQUIRED for Redis Cluster
   }
 )
 

@@ -4,28 +4,42 @@ const { createClient } = require('redis')
 
 module.exports = async (io) => {
   try {
-    const redisUrl = process.env.REDIS_URL || 
-      `redis://${process.env.REDIS_HOST || '127.0.0.1'}:${process.env.REDIS_PORT || 6379}`
+    const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1'
+    const REDIS_PORT = process.env.REDIS_PORT || 6379
+    const REDIS_PASSWORD = process.env.REDIS_PASSWORD || undefined
+
+    // AWS Redis OSS requires TLS
+    const redisUrl = `rediss://${REDIS_HOST}:${REDIS_PORT}`
 
     const pubClient = createClient({
       url: redisUrl,
-      password: process.env.REDIS_PASSWORD || undefined,
+      password: REDIS_PASSWORD,
       socket: {
-        reconnectStrategy: retries => Math.min(retries * 100, 3000)
+        tls: true,
+        rejectUnauthorized: false,
+        reconnectStrategy: retries => Math.min(retries * 200, 5000)
       }
     })
 
     const subClient = pubClient.duplicate()
 
-    // Connect Redis Clients
+    // Logging
+    pubClient.on('connect', () => console.log('✅ Redis Pub Connected'))
+    subClient.on('connect', () => console.log('✅ Redis Sub Connected'))
+
+    pubClient.on('error', err => console.error('❌ Redis Pub Error:', err.message))
+    subClient.on('error', err => console.error('❌ Redis Sub Error:', err.message))
+
+    // Connect both
     await pubClient.connect()
     await subClient.connect()
 
-    // Attach adapter
+    // Attach Socket.IO Redis Adapter
     io.adapter(createAdapter(pubClient, subClient))
 
-    console.log('🔗 Socket.IO Redis Adapter Connected (Multi-Server Ready)')
+    console.log('🔗 Socket.IO Redis Adapter READY — Multi-Server Sync Active')
+
   } catch (error) {
-    console.error('❌ Socket Redis Adapter Error:', error.message)
+    console.error('❌ Socket Redis Adapter Init Failed:', error)
   }
 }

@@ -22,7 +22,6 @@ module.exports = io => {
         }
 
         await Driver.findByIdAndUpdate(driverId, {
-          socketId: socket.id,
           isOnline: true,
           currentLocation: {
             type: 'Point',
@@ -30,7 +29,10 @@ module.exports = io => {
           }
         })
 
-        // Store in Redis GEO
+        // ✅ Save socket in Redis (multi-server safe)
+        await redis.set(`driver_socket:${driverId}`, socket.id)
+
+        // GEO store
         await redis.geoadd('geo:drivers', longitude, latitude, driverId)
 
         console.log(`🚗 Driver Online: ${driverId} (${latitude}, ${longitude})`)
@@ -39,72 +41,64 @@ module.exports = io => {
       }
     })
 
-    /***********************
-     * DRIVER ACCEPTS RIDE — FIRST ACCEPT WINS
-     ***********************/
+    /**
+     * DRIVER ACCEPTS RIDE — FIRST ACCEPT WINS (LOCKED)
+     */
     socket.on('ride_accept', async ({ rideId, driverId }) => {
       try {
-        // Fetch ride
         const ride = await Ride.findById(rideId)
+        if (!ride) return socket.emit('ride_error', { message: 'Ride not found' })
 
-        if (!ride) {
-          return socket.emit('ride_error', { message: 'Ride not found' })
-        }
-
-        // ❌ If already accepted by someone else
+        // Already accepted?
         if (ride.status === 'accepted') {
-          return socket.emit('ride_taken', {
-            message: 'Ride already accepted by another driver'
-          })
+          return socket.emit('ride_taken', { message: 'Ride already taken' })
         }
 
-        // Check Redis lock
+        // Redis lock check
         const lock = await redis.get(`lock:driver:${driverId}`)
         if (lock !== rideId) {
-          return socket.emit('ride_error', {
-            message: 'Lock expired or invalid'
-          })
+          return socket.emit('ride_error', { message: 'Lock expired or invalid' })
         }
 
-        // ✅ Assign driver FIRST COME FIRST SERVE
+        // ✅ Atomically lock ride (first wins)
+        const assigned = await redis.set(
+          `ride_lock:${rideId}`,
+          driverId,
+          'NX',
+          'EX',
+          30
+        )
+
+        if (!assigned) {
+          return socket.emit('ride_taken', { message: 'Ride already taken' })
+        }
+
+        // Assign driver
         ride.driver = driverId
         ride.status = 'accepted'
         await ride.save()
 
-        // ❌ Remove all other driver locks
-        await redis.del(`ride:locks:${rideId}`)
+        // 🚫 Remove locks
+        await redis.del(`lock:driver:${driverId}`)
 
-        // 🚫 Notify ALL other drivers that ride is taken
-        global.io.emit('ride_taken', {
-          rideId,
-          acceptedBy: driverId
-        })
+        // ✅ Notify ALL drivers ride taken (multi-server safe)
+        io.emit('ride_taken', { rideId, acceptedBy: driverId })
 
-        // 👥 Join ride room
+        // Join ride room
         socket.join(`ride:${rideId}`)
 
+        // Join user to room
         if (ride.userSocketId) {
-          const userSocket = io.sockets.sockets.get(ride.userSocketId)
-          userSocket?.join(`ride:${rideId}`)
+          io.to(ride.userSocketId).socketsJoin(`ride:${rideId}`)
+          io.to(ride.userSocketId).emit('ride_accepted', ride)
         }
 
-        // 📲 Notify rider
-        io.to(ride.userSocketId).emit('ride_accepted', ride)
-
-        // 🚗 Confirm driver
         socket.emit('ride_confirmed', ride)
 
         console.log(`✅ Ride Accepted: ${rideId} by Driver ${driverId}`)
       } catch (err) {
         console.error('Ride Accept Error:', err.message)
       }
-    })
-
-    /***********************
-     * OTHER DRIVERS STOP SEEING RIDE
-     ***********************/
-    socket.on('ride_taken', ({ rideId, acceptedBy }) => {
-      console.log(`🚫 Ride ${rideId} taken by ${acceptedBy}`)
     })
 
     /**
@@ -125,7 +119,7 @@ module.exports = io => {
     })
 
     /**
-     * DRIVER ARRIVED — Notify Rider
+     * DRIVER ARRIVED
      */
     socket.on('driver_arrived', async ({ rideId }) => {
       try {
@@ -135,7 +129,7 @@ module.exports = io => {
           { new: true }
         )
 
-        if (!ride) return console.log('❌ Ride not found')
+        if (!ride) return
 
         if (ride.userSocketId) {
           io.to(ride.userSocketId).emit('driver_arrived', ride)
@@ -148,17 +142,15 @@ module.exports = io => {
     })
 
     /**
-     * START RIDE — OTP VALIDATION
+     * START RIDE — OTP
      */
     socket.on('ride_start', async ({ rideId, otp }) => {
       try {
         const ride = await Ride.findById(rideId)
-
-        if (!ride)
-          return socket.emit('ride_error', { message: 'Ride not found' })
+        if (!ride) return socket.emit('ride_error', { message: 'Ride not found' })
 
         if (ride.startOtp !== otp) {
-          return socket.emit('ride_error', { message: 'Invalid Start OTP' })
+          return socket.emit('ride_error', { message: 'Invalid OTP' })
         }
 
         ride.status = 'in_progress'
@@ -174,17 +166,15 @@ module.exports = io => {
     })
 
     /**
-     * COMPLETE RIDE — OTP VALIDATION
+     * COMPLETE RIDE — OTP
      */
     socket.on('ride_complete', async ({ rideId, otp }) => {
       try {
         const ride = await Ride.findById(rideId)
-
-        if (!ride)
-          return socket.emit('ride_error', { message: 'Ride not found' })
+        if (!ride) return socket.emit('ride_error', { message: 'Ride not found' })
 
         if (ride.stopOtp !== otp) {
-          return socket.emit('ride_error', { message: 'Invalid Stop OTP' })
+          return socket.emit('ride_error', { message: 'Invalid OTP' })
         }
 
         ride.status = 'completed'
@@ -200,7 +190,7 @@ module.exports = io => {
     })
 
     /**
-     * RIDE CANCEL — USER OR DRIVER
+     * CANCEL RIDE
      */
     socket.on('ride_cancel', async ({ rideId, cancelledBy, reason }) => {
       try {
@@ -225,10 +215,15 @@ module.exports = io => {
     })
 
     /**
-     * SOCKET DISCONNECT
+     * DISCONNECT — cleanup socket
      */
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       console.log('🔴 Socket Disconnected:', socket.id)
+
+      const driver = await Driver.findOne({ socketId: socket.id })
+      if (driver) {
+        await redis.del(`driver_socket:${driver._id}`)
+      }
     })
   })
 }
