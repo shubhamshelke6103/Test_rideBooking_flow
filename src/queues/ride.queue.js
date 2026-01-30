@@ -1,9 +1,13 @@
 const { Queue } = require('bullmq')
 const redis = require('../config/redis')
-console.log("above Ride queue");
+
+console.log("🚕 Initializing Ride Queue")
+
 const rideQueue = new Queue('ride-booking', {
-  connection: redis
+  connection: redis,
+  prefix: '{ride-booking}' // REQUIRED for Redis Cluster
 })
-console.log("after Ride queue");
+
+console.log("✅ Ride Queue Ready")
 
 module.exports = rideQueue
