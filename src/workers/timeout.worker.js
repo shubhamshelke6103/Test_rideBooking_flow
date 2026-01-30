@@ -15,17 +15,18 @@ setInterval(async () => {
       continue
     }
 
-    console.log(`⌛ Ride Timeout: ${rideId}`)
-
     await Ride.findByIdAndUpdate(rideId, {
       status: 'cancelled',
       cancelledBy: 'system',
-      cancellationReason: 'No driver accepted in 30 seconds'
+      cancellationReason: 'Timeout'
     })
 
-    global.io.to(ride.userSocketId).emit('ride_cancelled', {
-      message: 'No driver accepted your ride'
-    })
+    // ✅ Publish cancel event
+    await redis.publish('socket-events', JSON.stringify({
+      type: 'ride_cancelled_user',
+      socketId: ride.userSocketId,
+      payload: { message: 'Ride timed out' }
+    }))
 
     await redis.del(key)
   }

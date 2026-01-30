@@ -4,7 +4,7 @@ const Ride = require('../models/ride.model')
 const Driver = require('../models/driver.model')
 
 const SEARCH_RADII = [3000, 6000, 9000, 12000]
-const ACCEPT_TIMEOUT = 30 // seconds
+const ACCEPT_TIMEOUT = 30
 
 console.log("🚀 Ride Worker Starting...")
 
@@ -21,11 +21,7 @@ const worker = new Worker(
 
     for (let radius of SEARCH_RADII) {
       ride = await Ride.findById(rideId)
-
-      if (!ride || ride.status === 'accepted') {
-        console.log(`🏁 Ride already accepted — STOP worker`)
-        return
-      }
+      if (!ride || ride.status === 'accepted') return
 
       console.log(`🔍 Searching drivers in ${radius}m`)
 
@@ -40,59 +36,50 @@ const worker = new Worker(
         }
       }).limit(10)
 
-      if (!drivers.length) {
-        console.log(`❌ No drivers in ${radius}m`)
-        continue
-      }
+      if (!drivers.length) continue
 
       console.log(`📡 Sending ride to ${drivers.length} drivers`)
 
       for (let driver of drivers) {
         if (ride.rejectedDrivers.includes(driver._id)) continue
 
-        // Lock driver for this ride
         await redis.set(`lock:driver:${driver._id}`, rideId, 'EX', ACCEPT_TIMEOUT)
 
         await Ride.findByIdAndUpdate(rideId, {
           $addToSet: { notifiedDrivers: driver._id }
         })
 
-        // ✅ Get socket from Redis (MULTI-SERVER SAFE)
         const socketId = await redis.get(`driver_socket:${driver._id}`)
 
         if (!socketId) {
-          console.log(`⚠️ Driver ${driver._id} socket not found in Redis`)
+          console.log(`⚠️ Driver ${driver._id} socket missing`)
           continue
         }
 
-        // ✅ Emit ride request safely
-        global.io.to(socketId).emit('ride_request', {
-          rideId,
-          pickupLocation: ride.pickupLocation,
-          dropoffLocation: ride.dropoffLocation
-        })
+        // ✅ Publish event instead of socket emit
+        await redis.publish('socket-events', JSON.stringify({
+          type: 'ride_request',
+          socketId,
+          payload: {
+            rideId,
+            pickupLocation: ride.pickupLocation,
+            dropoffLocation: ride.dropoffLocation
+          }
+        }))
 
-        console.log(`📤 Ride sent to Driver ${driver._id}`)
+        console.log(`📤 Ride published for Driver ${driver._id}`)
       }
 
-      console.log(`⏳ Waiting ${ACCEPT_TIMEOUT}s for accept...`)
+      console.log(`⏳ Waiting ${ACCEPT_TIMEOUT}s...`)
 
       const start = Date.now()
       while ((Date.now() - start) / 1000 < ACCEPT_TIMEOUT) {
         ride = await Ride.findById(rideId)
-
-        if (ride?.status === 'accepted') {
-          console.log(`🏆 Ride accepted — STOP worker`)
-          return
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 500))
+        if (ride?.status === 'accepted') return
+        await new Promise(r => setTimeout(r, 500))
       }
-
-      console.log(`🔁 Expanding search radius...`)
     }
 
-    // ❌ Cancel ride if still not accepted
     ride = await Ride.findById(rideId)
 
     if (ride?.status === 'requested') {
@@ -102,16 +89,18 @@ const worker = new Worker(
         cancellationReason: 'No driver accepted'
       })
 
-      console.log(`❌ Ride ${rideId} cancelled`)
+      await redis.publish('socket-events', JSON.stringify({
+        type: 'ride_cancelled_user',
+        socketId: ride.userSocketId,
+        payload: { message: 'No driver accepted your ride' }
+      }))
+
+      console.log(`❌ Ride cancelled`)
     }
   },
   {
     connection: redis,
     concurrency: 5,
-    prefix: '{ride-booking}' // REQUIRED for Redis Cluster
+    prefix: '{ride-booking}'
   }
 )
-
-worker.on('failed', (job, err) => {
-  console.error(`❌ Job Failed ${job?.id}:`, err.message)
-})
