@@ -2,11 +2,10 @@ const Ride = require('../models/ride.model')
 const Driver = require('../models/driver.model')
 const redis = require('../config/redis')
 
-module.exports = (io) => {
-
+module.exports = io => {
   global.io = io
 
-  io.on('connection', (socket) => {
+  io.on('connection', socket => {
     console.log('🟢 Socket Connected:', socket.id)
 
     /**
@@ -40,52 +39,72 @@ module.exports = (io) => {
       }
     })
 
-    /**
-     * DRIVER ACCEPTS RIDE — LOCK & CONFIRM
-     */
+    /***********************
+     * DRIVER ACCEPTS RIDE — FIRST ACCEPT WINS
+     ***********************/
     socket.on('ride_accept', async ({ rideId, driverId }) => {
       try {
-        const lock = await redis.get(`lock:driver:${driverId}`)
-        if (lock !== rideId) {
-          console.log('⚠ Lock mismatch, ignoring accept')
-          return
+        // Fetch ride
+        const ride = await Ride.findById(rideId)
+
+        if (!ride) {
+          return socket.emit('ride_error', { message: 'Ride not found' })
         }
 
-        const ride = await Ride.findById(rideId)
-        if (!ride || ride.status !== 'requested') return
+        // ❌ If already accepted by someone else
+        if (ride.status === 'accepted') {
+          return socket.emit('ride_taken', {
+            message: 'Ride already accepted by another driver'
+          })
+        }
 
-        // Assign ride
+        // Check Redis lock
+        const lock = await redis.get(`lock:driver:${driverId}`)
+        if (lock !== rideId) {
+          return socket.emit('ride_error', {
+            message: 'Lock expired or invalid'
+          })
+        }
+
+        // ✅ Assign driver FIRST COME FIRST SERVE
         ride.driver = driverId
         ride.status = 'accepted'
         await ride.save()
 
-        // Stop timeout timer
-        await redis.del(`ride:timeout:${rideId}`)
+        // ❌ Remove all other driver locks
+        await redis.del(`ride:locks:${rideId}`)
 
-        // Stop notifying other drivers
-        await redis.publish('ride_events', JSON.stringify({
-          type: 'RIDE_ASSIGNED',
-          rideId
-        }))
+        // 🚫 Notify ALL other drivers that ride is taken
+        global.io.emit('ride_taken', {
+          rideId,
+          acceptedBy: driverId
+        })
 
-        // Join ride room (driver)
+        // 👥 Join ride room
         socket.join(`ride:${rideId}`)
 
-        // Join ride room (user)
         if (ride.userSocketId) {
-          io.sockets.sockets.get(ride.userSocketId)?.join(`ride:${rideId}`)
+          const userSocket = io.sockets.sockets.get(ride.userSocketId)
+          userSocket?.join(`ride:${rideId}`)
         }
 
-        // Notify Rider
+        // 📲 Notify rider
         io.to(ride.userSocketId).emit('ride_accepted', ride)
 
-        // Notify Driver
+        // 🚗 Confirm driver
         socket.emit('ride_confirmed', ride)
 
-        console.log(`✅ Ride Accepted: ${rideId} by ${driverId}`)
+        console.log(`✅ Ride Accepted: ${rideId} by Driver ${driverId}`)
       } catch (err) {
         console.error('Ride Accept Error:', err.message)
       }
+    })
+
+    /***********************
+     * OTHER DRIVERS STOP SEEING RIDE
+     ***********************/
+    socket.on('ride_taken', ({ rideId, acceptedBy }) => {
+      console.log(`🚫 Ride ${rideId} taken by ${acceptedBy}`)
     })
 
     /**
@@ -135,7 +154,8 @@ module.exports = (io) => {
       try {
         const ride = await Ride.findById(rideId)
 
-        if (!ride) return socket.emit('ride_error', { message: 'Ride not found' })
+        if (!ride)
+          return socket.emit('ride_error', { message: 'Ride not found' })
 
         if (ride.startOtp !== otp) {
           return socket.emit('ride_error', { message: 'Invalid Start OTP' })
@@ -160,7 +180,8 @@ module.exports = (io) => {
       try {
         const ride = await Ride.findById(rideId)
 
-        if (!ride) return socket.emit('ride_error', { message: 'Ride not found' })
+        if (!ride)
+          return socket.emit('ride_error', { message: 'Ride not found' })
 
         if (ride.stopOtp !== otp) {
           return socket.emit('ride_error', { message: 'Invalid Stop OTP' })
