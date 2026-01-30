@@ -5,7 +5,7 @@ const Driver = require('../models/driver.model')
 
 const SEARCH_RADII = [3000, 6000, 9000, 12000]
 const ACCEPT_TIMEOUT = 30 // seconds
-
+console.log("inttait worker ");
 const worker = new Worker('ride-booking', async job => {
   const { rideId } = job.data
 
