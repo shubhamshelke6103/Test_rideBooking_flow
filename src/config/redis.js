@@ -2,21 +2,31 @@
 const IORedis = require('ioredis')
 
 const redis = new IORedis({
-  host: process.env.REDIS_HOST || '127.0.0.1',
+  host: process.env.REDIS_HOST,
   port: Number(process.env.REDIS_PORT) || 6379,
   password: process.env.REDIS_PASSWORD || undefined,
 
-  // Production stability settings
+  // AWS Redis OSS requires TLS
+  tls: {},
+
+  // Prevent BullMQ freezing
   maxRetriesPerRequest: null,
   enableReadyCheck: true,
+
+  // Connection stability
+  connectTimeout: 10000,
+  keepAlive: 10000,
+
   retryStrategy(times) {
-    const delay = Math.min(times * 50, 2000)
+    const delay = Math.min(times * 100, 3000)
+    console.warn(`🔄 Redis retry attempt #${times}, delay ${delay}ms`)
     return delay
   },
+
   reconnectOnError(err) {
-    console.error('Redis reconnect due to error:', err.message)
+    console.error('❌ Redis reconnect due to error:', err.message)
     return true
-  },
+  }
 })
 
 // Connected log
