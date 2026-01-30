@@ -1,4 +1,3 @@
-// src/config/redis.js
 const IORedis = require('ioredis')
 
 const redis = new IORedis({
@@ -6,20 +5,19 @@ const redis = new IORedis({
   port: Number(process.env.REDIS_PORT) || 6379,
   password: process.env.REDIS_PASSWORD || undefined,
 
-  // AWS Redis OSS requires TLS
+  // AWS Redis requires TLS
   tls: {},
 
-  // Prevent BullMQ freezing
+  // BullMQ safe config
   maxRetriesPerRequest: null,
-  enableReadyCheck: true,
+  enableReadyCheck: false,
 
-  // Connection stability
   connectTimeout: 10000,
   keepAlive: 10000,
 
   retryStrategy(times) {
-    const delay = Math.min(times * 100, 3000)
-    console.warn(`🔄 Redis retry attempt #${times}, delay ${delay}ms`)
+    const delay = Math.min(times * 200, 3000)
+    console.warn(`🔄 Redis retry #${times}, delay ${delay}ms`)
     return delay
   },
 
@@ -29,29 +27,21 @@ const redis = new IORedis({
   }
 })
 
-// Connected log
+// Logs
 redis.on('connect', () => {
   console.log('✅ Redis Connected')
 })
 
-// Ready log
 redis.on('ready', () => {
-  console.log('⚡ Redis Ready to use')
+  console.log('⚡ Redis Ready')
 })
 
-// Error handling
 redis.on('error', (err) => {
   console.error('❌ Redis Error:', err.message)
 })
 
-// Reconnecting log
-redis.on('reconnecting', (delay) => {
-  console.warn(`🔄 Redis reconnecting in ${delay}ms`)
-})
-
-// Close log
 redis.on('close', () => {
-  console.warn('🔌 Redis connection closed')
+  console.warn('🔌 Redis Connection Closed')
 })
 
 module.exports = redis
